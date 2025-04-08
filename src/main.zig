@@ -27,12 +27,16 @@ pub const PlayerCameraContainer = struct {
 
 pub fn main() !void {
     // --- setup ---
-    var arena_alloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_alloc.deinit();
-    const alloc = arena_alloc.allocator();
+    // var arena_alloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // defer arena_alloc.deinit();
+    // const alloc = arena_alloc.allocator();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const alloc = gpa.allocator();
 
     // configure window
-    c.SetConfigFlags(c.FLAG_WINDOW_RESIZABLE);
+    c.SetConfigFlags(c.FLAG_WINDOW_RESIZABLE & c.FLAG_WINDOW_HIGHDPI);
     c.InitWindow(window_width, window_height, "Gun11");
     defer c.CloseWindow();
 
@@ -101,6 +105,7 @@ pub fn main() !void {
     // ---
     while (!c.WindowShouldClose()) {
         // --- update ---
+        // If systems are order dependent, then the order they get called in in here is important.
         try contextSystem(&reg, alloc);
         try playerUpdateSystem(&reg, &player_group);
         try enemyUpdateSystem(&reg, &enemy_group, player_entity);
@@ -111,58 +116,6 @@ pub fn main() !void {
         camera.offset = c.Vector2{ .x = @as(f32, @floatFromInt(window_width)) / 2.0, .y = @as(f32, @floatFromInt(window_height)) / 2 };
         const player_rb = reg.getConst(comps.RigidBody, player_entity);
         camera.target = player_rb.translation;
-
-        // const player_tex_pos = c.Vector2Subtract(player.state.pos, player_tex_half_extents);
-        //
-        // gun.runUpdateEffect(.{ .alloc = alloc, .delta_t = delta_t, .mouse_pos = mouse_pos, .kb_inputs = kb_inputs, .wearer_pos = player_tex_pos });
-        //
-        // for (enemies.keys()) |enemy| {
-        //     enemy.runUpdateEffect(.{ .delta_t = delta_t, .target_pos = player.state.pos });
-        // }
-        //
-        // //check for collistion of bullet with enemy
-        // var bullets_broke = std.ArrayList(*BulletEntity).init(alloc);
-        // var enemies_dead = std.ArrayList(*EnemyEntity).init(alloc);
-        // for (gun.state.bullets.keys()) |b| {
-        //     for (enemies.keys()) |enemy| {
-        //         const enemy_pos = enemy.state.pos;
-        //         const enemy_tex_w = enemy.state.tex.?.width;
-        //         const enemy_tex_h = enemy.state.tex.?.height;
-        //         const enemy_rect = c.Rectangle{ .x = enemy_pos.x, .y = enemy_pos.y, .width = @as(f32, @floatFromInt(enemy_tex_w)), .height = @as(f32, @floatFromInt(enemy_tex_h)) };
-        //         if (c.CheckCollisionCircleRec(b.state.pos, 2.0, enemy_rect)) {
-        //             b.state.durability -= 1;
-        //             enemy.state.health -= b.state.damage;
-        //             if (b.state.durability <= 0) {
-        //                 bullets_broke.append(b) catch |err| {
-        //                     std.debug.print("error couldn't append broke bullet: {}\n", .{err});
-        //                 };
-        //             }
-        //             if (enemy.state.health <= 0) {
-        //                 enemies_dead.append(enemy) catch |err| {
-        //                     std.debug.print("error couldn't append dead enemy: {}\n", .{err});
-        //                 };
-        //             }
-        //         }
-        //     }
-        // }
-        // for (bullets_broke.items) |b| {
-        //     std.debug.print("num of bullets before remove: {}\n", .{gun.state.bullets.count()});
-        //     if (!gun.state.bullets.swapRemove(b)) {
-        //         std.debug.print("couldn't remove broke bullet successfully\n", .{});
-        //     }
-        //     std.debug.print("num of bullets after remove: {}\n", .{gun.state.bullets.count()});
-        //     alloc.destroy(b.state);
-        //     alloc.destroy(b);
-        // }
-        // for (enemies_dead.items) |e| {
-        //     if (!enemies.swapRemove(e)) {
-        //         std.debug.print("couldn't remove dead enemy successfully\n", .{});
-        //     }
-        //     alloc.destroy(e.state);
-        //     alloc.destroy(e);
-        // }
-        // bullets_broke.deinit();
-        // enemies_dead.deinit();
         // ---
         // --- draw ---
         c.BeginDrawing();
@@ -174,11 +127,11 @@ pub fn main() !void {
 
         c.DrawFPS(10, 10);
 
-        // objects
+        // The order in which systems are called determines the layer assets will be drawn on.
+        try projectileDrawSystem(&reg, &proj_group);
         try playerDrawSystem(&reg, &player_group);
         try enemyDrawSystem(&reg, &enemy_group);
         try gunDrawSystem(&reg, &gun_group);
-        try projectileDrawSystem(&reg, &proj_group);
 
         // // gui
         // if (gui.GuiWindowFloating(&window_position, &window_size, &minimized, &moving, &resizing, gui.ExampleContent, gui.DrawContent, .{ .x = 140, .y = 320 }, &scroll, "Player color switcher.")) |content| {
@@ -332,9 +285,7 @@ fn projectileUpdateSystem(reg: *ecs.Registry, proj_group: *ecs.BasicGroup) !void
 
         // destroy bullet when it reaches destination
         if (c.Vector2Distance(new_pos, proj.dest) < 0.01) {
-            projs_to_destroy.append(e) catch {
-                std.debug.print("Failed to append proj to destroy list\n", .{});
-            };
+            try projs_to_destroy.append(e);
         }
     }
 
@@ -471,9 +422,9 @@ fn gunDrawSystem(reg: *ecs.Registry, gun_group: *ecs.BasicGroup) !void {
         const drawable = reg.get(comps.Drawable, e);
         const tex = asset_storage.getTex(drawable.tex_name) orelse unreachable;
 
-        const origin = c.Vector2{ .x = @as(f32, @floatFromInt(tex.width)) / 2.0, .y = -5.0 };
+        const origin = c.Vector2{ .x = 0.0, .y = 0.0 };
         const gun_source_rect = c.Rectangle{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(tex.width)), .height = @as(f32, @floatFromInt(tex.height)) };
-        const gun_dest_rect = c.Rectangle{ .x = rb.translation.x, .y = rb.translation.y, .width = @as(f32, @floatFromInt(tex.width)) * 1.5, .height = @as(f32, @floatFromInt(tex.height)) * 1.5 };
+        const gun_dest_rect = c.Rectangle{ .x = rb.translation.x, .y = rb.translation.y, .width = @as(f32, @floatFromInt(tex.width)) * 0.1, .height = @as(f32, @floatFromInt(tex.height)) * 0.1 };
 
         // entity wearing gun
         if (gun.owner) |owner_entity| {
@@ -545,7 +496,7 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
     _ = try asset_storage.createAddTex(.bullet_default, conf.RESOURCES_BASE_PATH ++ "bullet-fin.png");
 
     // initialize gun
-    _ = try asset_storage.createAddTex(.gun_default, conf.RESOURCES_BASE_PATH ++ "mp4.png");
+    _ = try asset_storage.createAddTex(.gun_default, conf.RESOURCES_BASE_PATH ++ "PR42A-6mm-Assault-Rifle.png");
 
     const gun_entity = reg.create();
     reg.add(gun_entity, comps.RigidBody{

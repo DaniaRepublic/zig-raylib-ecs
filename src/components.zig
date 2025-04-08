@@ -13,6 +13,11 @@ pub const RigidBody = struct {
     angvel: f32 = 0.0,
 };
 
+// Physics
+pub const Collider = struct {
+    bounding_rect: c.Rectangle,
+};
+
 // Drawable
 pub const Drawable = struct {
     hidden: bool = false,

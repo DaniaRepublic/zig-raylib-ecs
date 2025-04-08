@@ -1,8 +1,12 @@
 Tasks:
   - [x] create node trees (child, parent relationships for nodes)
     - used ecs library to organize entities
-  - [ ] make objects pickable
-  - [ ] introduce some scorekeeping
+  - [x] make objects pickable
+    - implemented for guns
+  - [ ] create collision system. Options:
+   1. mark collided entities, then process them in a separate system.
+   2. create a new collider entity for each collision that stores both entities, then process the collision in a separate system.
+  - [ ] introduce some record keeping / inventory
 
 Gun mechanics:
   - Guns have limited ammunition, ammo packs lie around the map, pick them to refill guns.
