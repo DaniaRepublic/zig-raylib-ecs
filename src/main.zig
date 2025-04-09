@@ -69,30 +69,48 @@ pub fn main() !void {
 
     var reg = ecs.Registry.init(alloc);
     defer reg.deinit();
+    defer deinitContexts(&reg, alloc);
 
     reg.setContext(&asset_storage);
     reg.setContext(&player_camera_container);
 
     const player_entity = try createEntities(&reg);
 
+    // Make group with colliders owning as it seems to be the largest group. Up to change.
+    var collider_group = reg.group(.{
+        comps.RigidBody,
+        comps.Collider,
+    }, .{}, .{});
+    _ = &collider_group;
+    var collision_group = reg.group(.{}, .{
+        comps.Collision,
+    }, .{});
+    _ = &collision_group;
     var player_group = reg.group(.{}, .{
         comps.RigidBody,
+        comps.Collider,
         comps.Drawable,
         comps.Health,
         comps.Hero,
     }, .{});
-    var enemy_group = reg.group(.{
+    var enemy_group = reg.group(.{}, .{
         comps.RigidBody,
+        comps.Collider,
         comps.Drawable,
         comps.Health,
         comps.Enemy,
-    }, .{}, .{});
+    }, .{});
     var gun_group = reg.group(.{}, .{
         comps.RigidBody,
         comps.Drawable,
         comps.Gun,
     }, .{});
-    var proj_group = reg.group(.{}, .{ comps.RigidBody, comps.Drawable, comps.Projectile }, .{});
+    var proj_group = reg.group(.{}, .{
+        comps.RigidBody,
+        comps.Collider,
+        comps.Drawable,
+        comps.Projectile,
+    }, .{});
 
     // // initialize floating window state variables
     // var window_position: c.Vector2 = .{ .x = 600, .y = 50 };
@@ -102,15 +120,22 @@ pub fn main() !void {
     // var resizing: bool = false;
     // var scroll: c.Vector2 = .{ .x = 0, .y = 0 };
 
+    // var i: i32 = 0;
     // ---
     while (!c.WindowShouldClose()) {
+        // i += 1;
+        // if (@mod(i, 100) == 1) std.debug.print("on frame {}: {} collisions exist in total\n", .{ i, collision_group.len() });
+
         // --- update ---
         // If systems are order dependent, then the order they get called in in here is important.
-        try contextSystem(&reg, alloc);
+        try contextSystem(&reg);
         try playerUpdateSystem(&reg, &player_group);
         try enemyUpdateSystem(&reg, &enemy_group, player_entity);
         try gunUpdateSystem(&reg, &gun_group, player_entity);
         try projectileUpdateSystem(&reg, &proj_group);
+        // detect collisions last
+        // try collisionSystem(&reg, &collider_group);
+        // try handleCollisionSystem(&reg, &collision_group);
 
         setCurrWindowDims();
         camera.offset = c.Vector2{ .x = @as(f32, @floatFromInt(window_width)) / 2.0, .y = @as(f32, @floatFromInt(window_height)) / 2 };
@@ -147,8 +172,15 @@ pub fn main() !void {
     }
 }
 
+fn deinitContexts(reg: *ecs.Registry, alloc: std.mem.Allocator) void {
+    if (reg.getContext(conf.GameLoopCtx)) |old_context| {
+        alloc.destroy(old_context);
+    }
+}
+
 /// Sets GameLoopCtx context in registry. Get it after setting from anywhere with reg.getContext(GameLoopCtx).
-pub fn contextSystem(reg: *ecs.Registry, alloc: std.mem.Allocator) !void {
+pub fn contextSystem(reg: *ecs.Registry) !void {
+    const alloc = reg.allocator;
     // destroy old context if present
     if (reg.getContext(conf.GameLoopCtx)) |old_context| {
         alloc.destroy(old_context);
@@ -177,32 +209,64 @@ pub fn contextSystem(reg: *ecs.Registry, alloc: std.mem.Allocator) !void {
     reg.setContext(context);
 }
 
-fn enemyUpdateSystem(reg: *ecs.Registry, enemy_group: *ecs.OwningGroup, player_entity: ecs.Entity) !void {
-    const ctx = reg.getContext(conf.GameLoopCtx) orelse return error.GameLoopCtxUnavailabe;
-    const player_rb = reg.get(comps.RigidBody, player_entity);
-
-    var enemies_iter = enemy_group.iterator(struct { enemy: *comps.Enemy, rb: *comps.RigidBody });
-    while (enemies_iter.next()) |e| {
-        const enemy_to_player = c.Vector2Subtract(player_rb.translation, e.rb.translation);
-        const enemy_to_player_dist = c.Vector2Length(enemy_to_player);
-        if (enemy_to_player_dist < 300.0) {
-            e.enemy.action_state = .following_player;
-        } else {
-            e.enemy.action_state = .idle;
-        }
-        if (e.enemy.action_state == .following_player) {
-            e.rb.translation = c.Vector2MoveTowards(e.rb.translation, player_rb.translation, e.rb.vel * ctx.delta_t);
+/// creates collisions for each colliding entity
+pub fn collisionSystem(reg: *ecs.Registry, collider_group: *ecs.OwningGroup) !void {
+    var iter = collider_group.iterator(struct { rb: *comps.RigidBody, collider: *comps.Collider });
+    while (iter.next()) |e| {
+        var nested_iter = collider_group.iterator(struct { rb: *comps.RigidBody, collider: *comps.Collider });
+        while (nested_iter.next()) |e2| {
+            // if collision happens, create a new collision entity
+            if (comps.checkCollision(e.collider.*, e.rb.*, e2.collider.*, e2.rb.*)) {
+                const collision_entity = reg.create();
+                reg.add(collision_entity, comps.Collision{
+                    .entity_a = iter.entity(),
+                    .entity_b = nested_iter.entity(),
+                });
+            }
         }
     }
 }
 
-fn enemyDrawSystem(reg: *ecs.Registry, enemy_group: *ecs.OwningGroup) !void {
+/// handles collisions
+pub fn handleCollisionSystem(reg: *ecs.Registry, collision_group: *ecs.BasicGroup) !void {
+    const entities = collision_group.data();
+    for (entities) |e| {
+        reg.destroy(e);
+    }
+}
+
+pub fn enemyUpdateSystem(reg: *ecs.Registry, enemy_group: *ecs.BasicGroup, player_entity: ecs.Entity) !void {
+    const ctx = reg.getContext(conf.GameLoopCtx) orelse return error.GameLoopCtxUnavailabe;
+    const player_rb = reg.get(comps.RigidBody, player_entity);
+
+    var enemies_iter = enemy_group.iterator();
+    while (enemies_iter.next()) |e| {
+        const enemy = reg.get(comps.Enemy, e);
+        const rb = reg.get(comps.RigidBody, e);
+
+        const enemy_to_player = c.Vector2Subtract(player_rb.translation, rb.translation);
+        const enemy_to_player_dist = c.Vector2Length(enemy_to_player);
+        if (enemy_to_player_dist < 300.0) {
+            enemy.action_state = .following_player;
+        } else {
+            enemy.action_state = .idle;
+        }
+        if (enemy.action_state == .following_player) {
+            rb.translation = c.Vector2MoveTowards(rb.translation, player_rb.translation, rb.vel * ctx.delta_t);
+        }
+    }
+}
+
+fn enemyDrawSystem(reg: *ecs.Registry, enemy_group: *ecs.BasicGroup) !void {
     const asset_storage = reg.getContext(conf.AssetStorage) orelse unreachable;
 
-    var enemies_iter = enemy_group.iterator(struct { rb: *comps.RigidBody, drawable: *comps.Drawable });
+    var enemies_iter = enemy_group.iterator();
     while (enemies_iter.next()) |e| {
-        const tex = asset_storage.getTex(e.drawable.tex_name) orelse unreachable;
-        c.DrawTextureV(tex.*, e.rb.translation, e.drawable.tint);
+        const rb = reg.get(comps.RigidBody, e);
+        const drawable = reg.getConst(comps.Drawable, e);
+
+        const tex = asset_storage.getTex(drawable.tex_name) orelse unreachable;
+        c.DrawTextureV(tex.*, rb.translation, drawable.tint);
     }
 }
 
@@ -276,6 +340,8 @@ fn projectileUpdateSystem(reg: *ecs.Registry, proj_group: *ecs.BasicGroup) !void
     const ctx = reg.getContext(conf.GameLoopCtx) orelse unreachable;
 
     var projs_to_destroy = std.ArrayList(ecs.Entity).init(reg.allocator);
+    defer projs_to_destroy.deinit();
+
     var iter = proj_group.iterator();
     while (iter.next()) |e| {
         const rb = reg.get(comps.RigidBody, e);
@@ -452,9 +518,11 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
     // initialize enemy
     _ = try asset_storage.createAddTex(.enemy_default, conf.RESOURCES_BASE_PATH ++ "orange-eye-enemy.png");
 
-    for (0..1000) |_| {
+    for (0..10000) |_| {
         const entity = reg.create();
-        reg.add(entity, comps.Enemy{ .action_state = .idle });
+        reg.add(entity, comps.Enemy{
+            .action_state = .idle,
+        });
         reg.add(entity, comps.RigidBody{
             .vel = 100,
             .angvel = 0,
@@ -464,12 +532,18 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
                 .y = @as(f32, @floatFromInt(std.Random.intRangeAtMostBiased(Random, i32, 0, window_height))),
             },
         });
+        reg.add(entity, comps.Collider{
+            .layer_mask = comps.LAYER_1 | comps.LAYER_4,
+            .shape = .{ .Rectangle = .{ .width = 10, .height = 20 } },
+        });
         reg.add(entity, comps.Drawable{
             .hidden = false,
             .tex_name = .enemy_default,
             .tint = c.WHITE,
         });
-        reg.add(entity, comps.Health{ .health = 100 });
+        reg.add(entity, comps.Health{
+            .health = 100,
+        });
         reg.add(entity, comps.GunCarrier{});
     }
 
@@ -484,12 +558,18 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
         .linvel = .{ .x = 0, .y = 0 },
         .translation = .{ .x = 100, .y = 100 },
     });
+    reg.add(player_entity, comps.Collider{
+        .layer_mask = comps.LAYER_1,
+        .shape = .{ .Rectangle = .{ .width = 40, .height = 50 } },
+    });
     reg.add(player_entity, comps.Drawable{
         .hidden = false,
         .tex_name = .hero_default,
         .tint = c.WHITE,
     });
-    reg.add(player_entity, comps.Health{ .health = 100 });
+    reg.add(player_entity, comps.Health{
+        .health = 100,
+    });
     reg.add(player_entity, comps.GunCarrier{});
 
     // initialize bullet for gun
@@ -545,11 +625,19 @@ pub fn createBullet(reg: *ecs.Registry, pos: c.Vector2, target: c.Vector2) !void
         .rot = rot,
         .translation = pos,
     });
+    reg.add(bullet_entity, comps.Collider{
+        .layer_mask = comps.LAYER_4,
+        .shape = .{ .Rectangle = .{ .width = 10, .height = 5 } },
+    });
     reg.add(bullet_entity, comps.Drawable{
         .hidden = false,
         .tex_name = .bullet_default,
         .tint = c.WHITE,
     });
-    reg.add(bullet_entity, comps.Damage{ .damage = 80 });
-    reg.add(bullet_entity, comps.Projectile{ .dest = target });
+    reg.add(bullet_entity, comps.Damage{
+        .damage = 80,
+    });
+    reg.add(bullet_entity, comps.Projectile{
+        .dest = target,
+    });
 }

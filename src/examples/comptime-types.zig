@@ -21,6 +21,13 @@ fn CustomArgs(comptime _args_type: type, comptime _state: type) type {
 }
 
 pub fn main() void {
+    // binary ops
+    const a = 0b0001;
+    const b = 0b0010;
+    const c = 0b0100;
+    const d = a | b | c;
+
+    std.debug.print("{} {}\n", .{ c, d });
     var arena_alloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_alloc.deinit();
     const alloc = arena_alloc.allocator();
