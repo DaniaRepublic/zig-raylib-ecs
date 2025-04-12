@@ -1,13 +1,14 @@
 TODOs:
-  - [x] create node trees (child, parent relationships for nodes)
+  - [x] node trees (child, parent relationships for nodes)
     - used ecs library to organize entities
-  - [x] make objects pickable
+  - [x] objects pickable
     - implemented for guns
-  - [ ] create collision system. Options:
-    1. mark collided entities, then process them in a separate system.
-    2. create a new collider entity for each collision that stores both entities, then process the collision in a separate system.
-    3. test collision system.
-  - [ ] introduce some record keeping / inventory
+  - [ ] collision system.
+    1. new collider entity for each collision that stores both entities, then process the collision in a separate system.
+    2. collided entities push each other away so that they don't all overlap. This will reduce unnecessary collision creation.
+    3. implement spacial partitioning to improve performance.
+  - [ ] separate draw layers
+  - [ ] inventory
 
 Gun mechanics:
   - Guns have limited ammunition, ammo packs lie around the map, pick them to refill guns.

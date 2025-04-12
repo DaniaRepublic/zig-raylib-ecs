@@ -77,15 +77,13 @@ pub fn main() !void {
     const player_entity = try createEntities(&reg);
 
     // Make group with colliders owning as it seems to be the largest group. Up to change.
-    var collider_group = reg.group(.{
+    var rb_group = reg.group(.{
+        comps.RigidBody,
+    }, .{}, .{});
+    var collider_group = reg.group(.{}, .{
         comps.RigidBody,
         comps.Collider,
-    }, .{}, .{});
-    _ = &collider_group;
-    var collision_group = reg.group(.{}, .{
-        comps.Collision,
     }, .{});
-    _ = &collision_group;
     var player_group = reg.group(.{}, .{
         comps.RigidBody,
         comps.Collider,
@@ -129,13 +127,15 @@ pub fn main() !void {
         // --- update ---
         // If systems are order dependent, then the order they get called in in here is important.
         try contextSystem(&reg);
+        // gameplay systems
         try playerUpdateSystem(&reg, &player_group);
         try enemyUpdateSystem(&reg, &enemy_group, player_entity);
         try gunUpdateSystem(&reg, &gun_group, player_entity);
         try projectileUpdateSystem(&reg, &proj_group);
-        // detect collisions last
-        // try collisionSystem(&reg, &collider_group);
-        // try handleCollisionSystem(&reg, &collision_group);
+        // collision systems midify velocity so they need to be before rigid body system to have effects.
+        try collisionSystem(&reg, &collider_group);
+        // apply velocity
+        try rigidBodySystem(&reg, &rb_group);
 
         setCurrWindowDims();
         camera.offset = c.Vector2{ .x = @as(f32, @floatFromInt(window_width)) / 2.0, .y = @as(f32, @floatFromInt(window_height)) / 2 };
@@ -209,34 +209,46 @@ pub fn contextSystem(reg: *ecs.Registry) !void {
     reg.setContext(context);
 }
 
-/// creates collisions for each colliding entity
-pub fn collisionSystem(reg: *ecs.Registry, collider_group: *ecs.OwningGroup) !void {
-    var iter = collider_group.iterator(struct { rb: *comps.RigidBody, collider: *comps.Collider });
+pub fn rigidBodySystem(reg: *ecs.Registry, rb_group: *ecs.OwningGroup) !void {
+    _ = reg;
+    var iter = rb_group.iterator(struct { rb: *comps.RigidBody });
+    while (iter.next()) |el| {
+        const desired_tran = c.Vector2Add(el.rb.translation, el.rb.linvel);
+        el.rb.translation = c.Vector2MoveTowards(el.rb.translation, desired_tran, c.Vector2Length(el.rb.linvel));
+    }
+}
+
+/// Handles collisions.
+pub fn collisionSystem(reg: *ecs.Registry, collider_group: *ecs.BasicGroup) !void {
+    var iter = collider_group.iterator();
     while (iter.next()) |e| {
-        var nested_iter = collider_group.iterator(struct { rb: *comps.RigidBody, collider: *comps.Collider });
+        const rb = reg.get(comps.RigidBody, e);
+        const collider = reg.get(comps.Collider, e);
+
+        var nested_iter = collider_group.iterator();
         while (nested_iter.next()) |e2| {
+            if (e == e2) continue;
+
+            const rb2 = reg.get(comps.RigidBody, e2);
+            const collider2 = reg.get(comps.Collider, e2);
+
             // if collision happens, create a new collision entity
-            if (comps.checkCollision(e.collider.*, e.rb.*, e2.collider.*, e2.rb.*)) {
-                const collision_entity = reg.create();
-                reg.add(collision_entity, comps.Collision{
-                    .entity_a = iter.entity(),
-                    .entity_b = nested_iter.entity(),
-                });
+            if (comps.checkCollision(collider.*, rb.*, collider2.*, rb2.*)) {
+                const collision = comps.Collision{
+                    .entity_a = e,
+                    .entity_b = e2,
+                };
+                // increasing collision solver doesn't have much effect
+                for (0..5) |_| {
+                    try comps.resolveCollision(reg, collision);
+                }
             }
         }
     }
 }
 
-/// handles collisions
-pub fn handleCollisionSystem(reg: *ecs.Registry, collision_group: *ecs.BasicGroup) !void {
-    const entities = collision_group.data();
-    for (entities) |e| {
-        reg.destroy(e);
-    }
-}
-
 pub fn enemyUpdateSystem(reg: *ecs.Registry, enemy_group: *ecs.BasicGroup, player_entity: ecs.Entity) !void {
-    const ctx = reg.getContext(conf.GameLoopCtx) orelse return error.GameLoopCtxUnavailabe;
+    const ctx = reg.getContext(conf.GameLoopCtx) orelse unreachable;
     const player_rb = reg.get(comps.RigidBody, player_entity);
 
     var enemies_iter = enemy_group.iterator();
@@ -245,14 +257,16 @@ pub fn enemyUpdateSystem(reg: *ecs.Registry, enemy_group: *ecs.BasicGroup, playe
         const rb = reg.get(comps.RigidBody, e);
 
         const enemy_to_player = c.Vector2Subtract(player_rb.translation, rb.translation);
-        const enemy_to_player_dist = c.Vector2Length(enemy_to_player);
-        if (enemy_to_player_dist < 300.0) {
+        if (c.Vector2Length(enemy_to_player) < 300.0) {
             enemy.action_state = .following_player;
         } else {
             enemy.action_state = .idle;
         }
         if (enemy.action_state == .following_player) {
-            rb.translation = c.Vector2MoveTowards(rb.translation, player_rb.translation, rb.vel * ctx.delta_t);
+            const scaled_linvel = c.Vector2Scale(c.Vector2Normalize(enemy_to_player), rb.vel_scalar * ctx.delta_t);
+            rb.linvel = c.Vector2MoveTowards(rb.linvel, scaled_linvel, rb.vel_scalar * ctx.delta_t); // 10 here determines the max speed change per frame
+        } else {
+            rb.linvel = c.Vector2MoveTowards(rb.linvel, c.Vector2Zero(), rb.vel_scalar * ctx.delta_t);
         }
     }
 }
@@ -272,7 +286,6 @@ fn enemyDrawSystem(reg: *ecs.Registry, enemy_group: *ecs.BasicGroup) !void {
 
 fn playerUpdateSystem(reg: *ecs.Registry, player_group: *ecs.BasicGroup) !void {
     const ctx = reg.getContext(conf.GameLoopCtx) orelse return error.GameLoopCtxUnavailabe;
-    const delta_t = ctx.delta_t;
     const kb_inputs = ctx.kb_inputs;
 
     var move_vec = c.Vector2Zero();
@@ -289,19 +302,15 @@ fn playerUpdateSystem(reg: *ecs.Registry, player_group: *ecs.BasicGroup) !void {
         move_vec.y += 1;
     }
 
-    if (c.Vector2Length(move_vec) > 0) {
-        var player_iter = player_group.iterator();
-        while (player_iter.next()) |e| {
-            const rb = reg.get(comps.RigidBody, e);
-            const health = reg.get(comps.Health, e);
-            _ = health;
-            move_vec = c.Vector2Normalize(move_vec);
-            move_vec = c.Vector2Scale(move_vec, rb.vel * delta_t);
-            if (kb_inputs.l_shift) {
-                move_vec = c.Vector2Scale(move_vec, 1.5);
-            }
-            rb.translation = c.Vector2Add(rb.translation, move_vec);
+    var player_iter = player_group.iterator();
+    while (player_iter.next()) |e| {
+        const rb = reg.get(comps.RigidBody, e);
+        move_vec = c.Vector2Normalize(move_vec);
+        if (kb_inputs.l_shift) {
+            move_vec = c.Vector2Scale(move_vec, 1.5);
         }
+        const scaled_linvel = c.Vector2Scale(move_vec, rb.vel_scalar * ctx.delta_t);
+        rb.linvel = c.Vector2MoveTowards(rb.linvel, scaled_linvel, rb.vel_scalar * ctx.delta_t); // 10 here determines the max speed change per frame
     }
 }
 
@@ -338,7 +347,6 @@ fn playerDrawSystem(reg: *ecs.Registry, player_group: *ecs.BasicGroup) !void {
 
 fn projectileUpdateSystem(reg: *ecs.Registry, proj_group: *ecs.BasicGroup) !void {
     const ctx = reg.getContext(conf.GameLoopCtx) orelse unreachable;
-
     var projs_to_destroy = std.ArrayList(ecs.Entity).init(reg.allocator);
     defer projs_to_destroy.deinit();
 
@@ -346,13 +354,15 @@ fn projectileUpdateSystem(reg: *ecs.Registry, proj_group: *ecs.BasicGroup) !void
     while (iter.next()) |e| {
         const rb = reg.get(comps.RigidBody, e);
         const proj = reg.get(comps.Projectile, e);
-        const new_pos = c.Vector2MoveTowards(rb.translation, proj.dest, rb.vel * ctx.delta_t);
-        rb.translation = new_pos;
 
-        // destroy bullet when it reaches destination
-        if (c.Vector2Distance(new_pos, proj.dest) < 0.01) {
+        // destroy bullet when it covers its range
+        if (c.Vector2Length(c.Vector2Subtract(rb.translation, proj.from)) >= proj.range) {
             try projs_to_destroy.append(e);
+            continue;
         }
+
+        const scaled_linvel = c.Vector2Scale(proj.dir, rb.vel_scalar * ctx.delta_t);
+        rb.linvel = c.Vector2MoveTowards(rb.linvel, scaled_linvel, rb.vel_scalar * ctx.delta_t); // 100 here determines the max speed change per frame
     }
 
     for (projs_to_destroy.items) |e| {
@@ -518,15 +528,15 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
     // initialize enemy
     _ = try asset_storage.createAddTex(.enemy_default, conf.RESOURCES_BASE_PATH ++ "orange-eye-enemy.png");
 
-    for (0..10000) |_| {
+    for (0..100) |_| {
         const entity = reg.create();
         reg.add(entity, comps.Enemy{
             .action_state = .idle,
         });
         reg.add(entity, comps.RigidBody{
-            .vel = 100,
+            .mass = 0.5,
             .angvel = 0,
-            .linvel = .{ .x = 0, .y = 0 },
+            .linvel = c.Vector2Zero(),
             .translation = .{
                 .x = @as(f32, @floatFromInt(std.Random.intRangeAtMostBiased(Random, i32, 0, window_width))),
                 .y = @as(f32, @floatFromInt(std.Random.intRangeAtMostBiased(Random, i32, 0, window_height))),
@@ -553,9 +563,9 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
     const player_entity = reg.create();
     reg.add(player_entity, comps.Hero{});
     reg.add(player_entity, comps.RigidBody{
-        .vel = 100,
+        .mass = 10,
         .angvel = 0,
-        .linvel = .{ .x = 0, .y = 0 },
+        .linvel = c.Vector2Zero(),
         .translation = .{ .x = 100, .y = 100 },
     });
     reg.add(player_entity, comps.Collider{
@@ -580,9 +590,9 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
 
     const gun_entity = reg.create();
     reg.add(gun_entity, comps.RigidBody{
-        .vel = 0,
+        .mass = 2,
         .angvel = 0,
-        .linvel = .{ .x = 0, .y = 0 },
+        .linvel = c.Vector2Zero(),
         .translation = .{ .x = 300, .y = 300 },
     });
     reg.add(gun_entity, comps.Drawable{
@@ -596,9 +606,9 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
 
     const gun_entity2 = reg.create();
     reg.add(gun_entity2, comps.RigidBody{
-        .vel = 0,
+        .mass = 1,
         .angvel = 0,
-        .linvel = .{ .x = 0, .y = 0 },
+        .linvel = c.Vector2Zero(),
         .translation = .{ .x = 300, .y = 200 },
     });
     reg.add(gun_entity2, comps.Drawable{
@@ -615,19 +625,22 @@ fn createEntities(reg: *ecs.Registry) !ecs.Entity {
 
 pub fn createBullet(reg: *ecs.Registry, pos: c.Vector2, target: c.Vector2) !void {
     const rot = c.Vector2Angle(.{ .x = 1.0, .y = 0.0 }, c.Vector2Subtract(target, pos)) / std.math.pi * 180.0;
+    const dir = c.Vector2Normalize(c.Vector2Subtract(target, pos));
 
     const bullet_entity = reg.create();
     // create bullet on some trigger
     reg.add(bullet_entity, comps.RigidBody{
-        .vel = 700,
-        .linvel = .{ .x = 0, .y = 0 },
-        .angvel = 0,
+        .mass = 0.1,
+        .linvel = c.Vector2Zero(),
+        .vel_scalar = 600.0,
+        .angvel = 0.0,
         .rot = rot,
         .translation = pos,
     });
     reg.add(bullet_entity, comps.Collider{
         .layer_mask = comps.LAYER_4,
-        .shape = .{ .Rectangle = .{ .width = 10, .height = 5 } },
+        .layer_exclude = comps.LAYER_4,
+        .shape = .{ .Rectangle = .{ .width = 10.0, .height = 5.0 } },
     });
     reg.add(bullet_entity, comps.Drawable{
         .hidden = false,
@@ -635,9 +648,11 @@ pub fn createBullet(reg: *ecs.Registry, pos: c.Vector2, target: c.Vector2) !void
         .tint = c.WHITE,
     });
     reg.add(bullet_entity, comps.Damage{
-        .damage = 80,
+        .damage = 80.0,
     });
     reg.add(bullet_entity, comps.Projectile{
-        .dest = target,
+        .from = pos,
+        .dir = dir,
+        .range = 300.0,
     });
 }
